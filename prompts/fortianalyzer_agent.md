@@ -75,12 +75,27 @@ Prefer day units for multi-day windows (`3.5-day` over `84-hour`).
 Use the `device` parameter (not the filter) to restrict which firewall is queried.
 
 ## Device parameter
-The `device` parameter accepts serial numbers (e.g. `FG100FTK00000001`) or device names
-(e.g. `myfw01`). Device names sometimes fail with "None of the device(s) can be found" —
-if that happens, call `list_devices` to get the serial number and retry with that.
+The `device` parameter accepts a serial number (e.g. `FG100FTK00000001`), a device name
+(e.g. `myfw01`), or — for HA clusters — a list or comma-separated string of both member
+serials (e.g. `["FG100FTK00000001", "FG100FTK00000002"]`). Logs may be stored under either
+cluster member depending on which node was active, so always pass both serials for a cluster.
+Device names sometimes fail with "None of the device(s) can be found" — if that happens,
+call `list_devices` to get the serial number(s) and retry.
 
-## search_traffic_logs available filter parameters
-`srcip`, `dstip`, `srcport`, `dstport`, `srcintf`, `dstintf`, `action`, `policy_id`, `device`, `time_range`
+## Multi-value filter parameters
+Most filter parameters in `search_traffic_logs` and `search_security_logs` accept a single
+value or a list. A list produces an OR-joined filter clause:
+
+| Parameter | Tool(s) | Example list |
+|---|---|---|
+| `srcip` / `dstip` | traffic, security | `["10.0.0.1", "10.0.0.2"]` |
+| `srcport` / `dstport` | traffic | `[80, 443, 8080]` |
+| `action` | traffic | `["deny", "drop"]` |
+| `severity` | security | `["critical", "high"]` |
+| `device` | traffic, security | `["FG100FTK00000001", "FG100FTK00000002"]` |
+
+`policy_id` and `srcintf`/`dstintf` are single-value only — use `query_logs` with a manual
+`filter` string if you need OR logic on those fields.
 
 For other fields (e.g. `logid`, `policyname`, `devname`), use `query_logs` with the `filter` parameter.
 
