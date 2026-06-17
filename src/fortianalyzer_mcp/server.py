@@ -108,6 +108,7 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
                 ("search_traffic_logs", "Search traffic logs"),
                 ("search_security_logs", "Search security logs"),
                 ("search_event_logs", "Search event logs"),
+                ("summarize_utm_logs", "Aggregate UTM logs by field (dns/qname, webfilter/hostname, av/virus, app-ctrl/app, ssl/sni)"),
                 ("get_logfiles_state", "Get log file state info"),
                 ("get_pcap_file", "Get PCAP file from log"),
             ],
@@ -248,6 +249,7 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             "search_traffic_logs": log_tools.search_traffic_logs,
             "search_security_logs": log_tools.search_security_logs,
             "search_event_logs": log_tools.search_event_logs,
+            "summarize_utm_logs": log_tools.summarize_utm_logs,
             "get_logfiles_state": log_tools.get_logfiles_state,
             "get_pcap_file": log_tools.get_pcap_file,
             # DVM tools

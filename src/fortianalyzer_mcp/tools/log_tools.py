@@ -7,6 +7,7 @@ Implements the two-step TID-based log search workflow.
 import asyncio
 import logging
 import math
+from collections import Counter, defaultdict
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
@@ -82,6 +83,33 @@ _SEARCH_REGISTRY: dict[int, dict[str, Any]] = {}
 # Cap the registry so a long-lived process cannot accumulate handles without
 # bound; evict the oldest handle past the cap (FIFO, dict is insertion-ordered).
 _SEARCH_REGISTRY_MAX = 512
+
+# UTM log type set — covers all non-traffic, non-event log categories.
+_UTM_LOG_TYPES = frozenset({
+    "dns", "virus", "webfilter", "app-ctrl", "dlp",
+    "voip", "ssl", "file-filter", "icap", "virtual-patch", "utm", "anomaly",
+})
+
+
+# Fields valid for summarize_utm_logs group_by parameter.
+_VALID_UTM_GROUP_BY_FIELDS = frozenset({
+    # Common UTM fields
+    "srcip", "dstip", "action", "level", "devname", "policyid",
+    "srcintf", "dstintf", "srccountry", "dstcountry", "subtype", "eventtype",
+    # DNS-specific
+    "qname", "qtype", "ipaddr", "catdesc", "cat",
+    # Webfilter-specific
+    "hostname",
+    # AV-specific
+    "virus", "filename", "filetype",
+    # App-ctrl-specific
+    "app", "appcat",
+    # SSL-specific
+    "sni",
+})
+
+# Numeric fields that can be summed per group in summarize_utm_logs.
+_VALID_UTM_SUM_FIELDS = frozenset({"sentbyte", "rcvdbyte"})
 
 
 def _register_search(tid: int, context: dict[str, Any]) -> None:
@@ -1411,6 +1439,297 @@ async def search_event_logs(
             error="faz_operation_failed",
             message=str(e),
             operation="search_event_logs",
+            adom=adom,
+            retry_count=getattr(e, "retries_attempted", 0),
+        )
+
+
+def _extract_log_time(log: dict[str, Any]) -> "datetime | None":
+    """Return a naive datetime from a FAZ log entry, or None if unparseable.
+
+    FAZ logs carry 'date' (YYYY-MM-DD) and 'time' (HH:MM:SS) as separate
+    string fields. Falls back to 'itime' (integer epoch seconds).
+    """
+    from datetime import datetime as _dt
+
+    date_str = log.get("date")
+    time_str = log.get("time")
+    if date_str and time_str:
+        try:
+            return _dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+    itime = log.get("itime")
+    if itime:
+        try:
+            return _dt.fromtimestamp(int(itime))
+        except (ValueError, OSError):
+            pass
+    return None
+
+
+@mcp.tool()
+async def summarize_utm_logs(
+    adom: str | None = None,
+    logtype: str = "dns",
+    srcip: str | None = None,
+    dstip: str | None = None,
+    action: str | None = None,
+    level: str | None = None,
+    device: str | None = None,
+    time_range: str = "24-hour",
+    filter: str | None = None,
+    group_by: list[str] | str = "qname",
+    sum_fields: list[str] | None = None,
+    top_n: int = 50,
+    max_logs: int = 1000,
+    scan_timeout: int = 55,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    """Fetch UTM logs and return a ranked aggregation summary.
+
+    Fetches up to max_logs raw UTM log entries matching the given filters
+    (using paginated 1000-log FAZ pages under the hood), groups them
+    server-side by one or more fields, and returns the top_n groups sorted
+    by count descending. Optionally sums numeric fields per group.
+
+    Use this instead of search_utm_logs when you need unique values, counts,
+    or a ranked breakdown rather than raw log entries — for example:
+    - DNS: group_by="qname" to see top queried domains
+    - Webfilter: group_by="hostname" to see top blocked/allowed websites
+    - AV/virus: group_by="virus" to see most-detected threats
+    - App-ctrl: group_by=["app", "appcat"] to see top applications
+    - SSL inspection: group_by="sni" to see top TLS destinations
+
+    Args:
+        adom: ADOM name (default: from config DEFAULT_ADOM)
+        logtype: UTM log type. One of: dns, virus, webfilter, app-ctrl, dlp,
+            voip, ssl, file-filter, icap, virtual-patch, utm, anomaly.
+            Defaults to "dns".
+        srcip: Source IP or CIDR filter (e.g. "192.168.1.0/24")
+        dstip: Destination IP or CIDR filter
+        action: Action filter (e.g. "blocked", "allowed", "passthrough",
+            "reset", "detected"). Value is sanitized against injection.
+        level: Log level filter ("emergency", "alert", "critical", "error",
+            "warning", "notice", "information", "debug")
+        device: Device filter (serial number like "FG100FTK00000001" or name)
+        time_range: Time range (default: "24-hour")
+        filter: Raw FAZ filter string for logtype-specific fields, appended
+            to any auto-built filters. Example: 'qname contain example.com'
+            for DNS, 'hostname contain malware' for webfilter.
+        group_by: Field name or list of field names to group by.
+            Valid fields: srcip, dstip, action, level, devname, policyid,
+            srcintf, dstintf, srccountry, dstcountry, subtype, eventtype,
+            qname, qtype, ipaddr, catdesc, cat, hostname, virus, filename,
+            filetype, app, appcat, sni. Defaults to "qname".
+        sum_fields: Optional list of numeric fields to sum per group.
+            Valid fields: sentbyte, rcvdbyte.
+        top_n: Number of top groups to return (default: 50)
+        max_logs: Total logs to scan across all pages (default: 1000).
+            Values above 1000 trigger paginated fetching. Each 1000-log
+            page adds ~1-2 s. Capped at 500,000.
+        scan_timeout: Wall-clock budget in seconds for pages beyond the
+            first (default: 55). Together with the 30s per-page timeout
+            this keeps total execution under ~90s.
+        timeout: Per-page FAZ search timeout in seconds (default: 30).
+
+    Returns:
+        dict with keys:
+            - status: "success" or "error"
+            - logtype: UTM log type queried
+            - group_by: list of field names used for grouping
+            - sum_fields: list of summed fields (empty if none)
+            - logs_scanned: total raw logs processed across all pages
+            - total_matched: total logs matching the filter in FAZ (may be None)
+            - total_is_known: whether total_matched is authoritative
+            - has_more: True if FAZ has more matching logs beyond logs_scanned
+            - scan_truncated: True if scan_timeout fired before reaching max_logs
+            - unique_count: total unique groups found before top_n cut
+            - top_n: the top_n value used
+            - results: list of dicts, each with group fields + "count" +
+                       any sum_fields values, sorted by count desc
+            - filter_applied: filter string sent to FAZ
+            - time_range: resolved time bounds sent to FAZ
+            - scan_start_time: earliest log timestamp seen (YYYY-MM-DD HH:MM:SS)
+            - scan_end_time: latest log timestamp seen (YYYY-MM-DD HH:MM:SS)
+
+    Example:
+        >>> # Top queried DNS domains
+        >>> result = await summarize_utm_logs(
+        ...     logtype="dns",
+        ...     group_by="qname",
+        ...     time_range="24-hour",
+        ... )
+        >>> # Top blocked websites per source IP
+        >>> result = await summarize_utm_logs(
+        ...     logtype="webfilter",
+        ...     action="blocked",
+        ...     group_by=["srcip", "hostname"],
+        ...     time_range="7-day",
+        ... )
+    """
+    try:
+        adom = adom or get_default_adom()
+
+        if logtype not in _UTM_LOG_TYPES:
+            raise ValidationError(
+                f"Invalid logtype '{logtype}'. Valid UTM log types: "
+                f"{', '.join(sorted(_UTM_LOG_TYPES))}"
+            )
+
+        if isinstance(group_by, str):
+            group_by = [group_by]
+        invalid_group = set(group_by) - _VALID_UTM_GROUP_BY_FIELDS
+        if invalid_group:
+            raise ValidationError(
+                f"Invalid group_by field(s): {sorted(invalid_group)}. "
+                f"Valid fields: {sorted(_VALID_UTM_GROUP_BY_FIELDS)}"
+            )
+
+        if sum_fields:
+            invalid_sum = set(sum_fields) - _VALID_UTM_SUM_FIELDS
+            if invalid_sum:
+                raise ValidationError(
+                    f"Invalid sum_fields: {sorted(invalid_sum)}. "
+                    f"Valid fields: {sorted(_VALID_UTM_SUM_FIELDS)}"
+                )
+
+        if not isinstance(max_logs, int) or isinstance(max_logs, bool) or max_logs < 1:
+            max_logs = 1000
+        max_logs = min(max_logs, 500_000)
+
+        filters = []
+        if srcip:
+            filters.append(f"srcip=={validate_ip_or_cidr(srcip, 'srcip')}")
+        if dstip:
+            filters.append(f"dstip=={validate_ip_or_cidr(dstip, 'dstip')}")
+        if action:
+            filters.append(f"action=={sanitize_filter_value(action, 'action')}")
+        if level:
+            filters.append(f"level=={validate_event_level(level)}")
+        if filter:
+            filters.append(filter)
+
+        filter_str = " and ".join(filters) if filters else None
+
+        counts: Counter = Counter()
+        sums: dict = defaultdict(lambda: {f: 0 for f in (sum_fields or [])})
+        logs_scanned = 0
+        scan_min_time: Any = None
+        scan_max_time: Any = None
+
+        def _accumulate(logs: list) -> None:
+            nonlocal scan_min_time, scan_max_time
+            for log in logs:
+                if len(group_by) == 1:
+                    key = str(log.get(group_by[0], "(unknown)"))
+                else:
+                    key = tuple(str(log.get(f, "(unknown)")) for f in group_by)
+                counts[key] += 1
+                if sum_fields:
+                    for sf in sum_fields:
+                        raw = log.get(sf, 0)
+                        try:
+                            sums[key][sf] += int(raw) if raw else 0
+                        except (ValueError, TypeError):
+                            pass
+                t = _extract_log_time(log)
+                if t is not None:
+                    if scan_min_time is None or t < scan_min_time:
+                        scan_min_time = t
+                    if scan_max_time is None or t > scan_max_time:
+                        scan_max_time = t
+
+        result = await query_logs(
+            adom=adom,
+            logtype=logtype,
+            device=device,
+            time_range=time_range,
+            filter=filter_str,
+            limit=LOG_FETCH_LIMIT_MAX,
+            timeout=timeout,
+        )
+
+        if result.get("status") != "success":
+            return result
+
+        _accumulate(result.get("logs", []))
+        logs_scanned += len(result.get("logs", []))
+        total_matched = result.get("total")
+        total_is_known = result.get("total_is_known", False)
+        has_more = result.get("has_more", False)
+        time_range_resolved = result.get("time_range")
+        tid = result.get("tid")
+        scan_truncated = False
+
+        if max_logs > LOG_FETCH_LIMIT_MAX and has_more and tid:
+            loop = asyncio.get_event_loop()
+            deadline = loop.time() + scan_timeout
+            while has_more and logs_scanned < max_logs:
+                remaining_scan = deadline - loop.time()
+                if remaining_scan <= 0:
+                    scan_truncated = True
+                    break
+                page = await fetch_more_logs(
+                    adom=adom,
+                    tid=tid,
+                    limit=min(LOG_FETCH_LIMIT_MAX, max_logs - logs_scanned),
+                    offset=logs_scanned,
+                    timeout=min(timeout, max(1, int(remaining_scan))),
+                )
+                if page.get("status") != "success":
+                    break
+                page_logs = page.get("logs", [])
+                if not page_logs:
+                    break
+                _accumulate(page_logs)
+                logs_scanned += len(page_logs)
+                has_more = page.get("has_more", False)
+
+        rows = []
+        for key, count in counts.most_common(top_n):
+            if isinstance(key, tuple):
+                row = dict(zip(group_by, key))
+            else:
+                row = {group_by[0]: key}
+            row["count"] = count
+            if sum_fields:
+                row.update(sums[key])
+            rows.append(row)
+
+        _fmt = "%Y-%m-%d %H:%M:%S"
+        return {
+            "status": "success",
+            "logtype": logtype,
+            "group_by": group_by,
+            "sum_fields": sum_fields or [],
+            "logs_scanned": logs_scanned,
+            "total_matched": total_matched,
+            "total_is_known": total_is_known,
+            "has_more": has_more,
+            "scan_truncated": scan_truncated,
+            "unique_count": len(counts),
+            "top_n": top_n,
+            "results": rows,
+            "filter_applied": filter_str or "none",
+            "time_range": time_range_resolved,
+            "scan_start_time": scan_min_time.strftime(_fmt) if scan_min_time else None,
+            "scan_end_time": scan_max_time.strftime(_fmt) if scan_max_time else None,
+        }
+
+    except ValidationError as e:
+        return error_response(
+            error="validation_error",
+            message=f"Validation error: {e}",
+            operation="summarize_utm_logs",
+            adom=adom,
+        )
+    except Exception as e:
+        logger.error(f"Failed to summarize UTM logs: {e}")
+        return error_response(
+            error="faz_operation_failed",
+            message=str(e),
+            operation="summarize_utm_logs",
             adom=adom,
             retry_count=getattr(e, "retries_attempted", 0),
         )
