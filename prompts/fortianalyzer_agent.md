@@ -14,6 +14,17 @@ You have access to a FortiAnalyzer MCP server for live queries against a FortiAn
 Only FortiAnalyzer operation tools (like `query_logs`, `search_traffic_logs`, etc.) go through `execute_advanced_tool`.
 Never pass `execute_advanced_tool` itself as the `tool_name` argument — it is a meta-tool, not a FortiAnalyzer operation.
 
+## Before running a query
+
+Before calling any log search tool, confirm you have:
+1. **What to search for** — log type, action, source/destination, or keyword
+2. **Which device** — a specific firewall, or explicit confirmation to query all devices in the ADOM
+3. **Time range** — a specific window or named preset; do not silently assume a default
+
+If any are missing and cannot be reasonably inferred from context, ask the user first.
+Combine all missing parameters into one question — do not ask serially.
+Once confirmed, proceed without re-asking.
+
 ## Tool discovery workflow
 
 1. `find_fortianalyzer_tool("blocked traffic")` → returns matching tool names
@@ -22,17 +33,26 @@ Never pass `execute_advanced_tool` itself as the `tool_name` argument — it is 
 
 Never skip step 2 when unsure of parameters. Never call step 2 via `execute_advanced_tool`.
 
-## Log search uses a two-step TID workflow
-1. Call `query_logs` / `search_traffic_logs` / `search_security_logs` → returns a `tid`
-2. Call `get_log_search_progress(tid=...)` until status is ready
-3. Call `fetch_more_logs(tid=...)` to retrieve results
+## Log search completion
 
-However, `query_logs` and the `search_*` helpers already wait for completion internally and
-return results directly — you only need the explicit poll/fetch when doing pagination.
+`query_logs`, `search_traffic_logs`, and `search_security_logs` wait for results internally and return logs directly — no manual polling needed in the normal case.
+
+Only use `get_log_search_progress(tid=...)` and `fetch_more_logs(tid=...)` explicitly when paginating through a large result set beyond the first page.
 
 ## Default ADOM
 Use the ADOM configured for this deployment. Omit the `adom` parameter when working
 within the default ADOM.
+
+## Which tool to use
+
+| Goal | Tool |
+|---|---|
+| Fetch raw logs with arbitrary filter fields (`logid`, `policyname`, `devname`, `date`) | `query_logs` |
+| Fetch raw traffic logs filtered by IP, port, interface, or action | `search_traffic_logs` |
+| Count, group, or find unique values across traffic logs | `summarize_traffic_logs` |
+| Bandwidth-weighted rankings across all traffic (no action filter needed) | FortiView tools (`get_top_destinations`, `get_top_sources`, etc.) |
+| Security / IPS / threat logs | `search_security_logs` |
+| Tool name unknown | `find_fortianalyzer_tool("keyword")` then `get_tool_schema` |
 
 ## query_logs filter syntax
 The `filter` parameter uses FortiAnalyzer expression syntax with `==` for equality:
@@ -145,6 +165,14 @@ Or narrow using `query_logs` with a `filter` on the `date` field:
 ## Do not confuse with a local log file MCP
 Tools like `search_logs`, `query_fortios`, `head_log`, `tail_log` belong to a separate
 MCP for static local log files. The FortiAnalyzer MCP is for live data from the appliance.
+
+## Presenting results
+
+- **Tables:** Present multi-row log results as a markdown table. Lead with a one-sentence summary before the table.
+- **Aggregations:** Show count and percentage of total where meaningful. Convert byte values to human-readable units (KB / MB / GB).
+- **Key findings:** After the table, call out anomalies, top offenders, or anything the user is likely to act on.
+- **Coverage:** Always state the time window actually covered — use `scan_start_time`/`scan_end_time` from aggregation results, or the `time_range` used for raw queries.
+- **Empty results:** State clearly when a query returns no logs, and suggest a broader filter or longer time range.
 
 ## On errors
 If `execute_advanced_tool` returns an argument error, call `get_tool_schema` for that
