@@ -17,6 +17,7 @@ from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
     build_device_filter,
+    build_or_filter,
     get_default_adom,
     sanitize_filter_value,
     validate_adom,
@@ -1128,13 +1129,13 @@ async def get_log_fields(
 @mcp.tool()
 async def search_traffic_logs(
     adom: str | None = None,
-    srcip: str | None = None,
-    dstip: str | None = None,
-    srcport: int | None = None,
-    dstport: int | None = None,
-    action: str | None = None,
+    srcip: str | list[str] | None = None,
+    dstip: str | list[str] | None = None,
+    srcport: int | list[int] | None = None,
+    dstport: int | list[int] | None = None,
+    action: str | list[str] | None = None,
     policy_id: int | None = None,
-    device: str | None = None,
+    device: str | list[str] | None = None,
     time_range: str = "1-hour",
     limit: int = 100,
     timeout: int = DEFAULT_SEARCH_TIMEOUT,
@@ -1146,13 +1147,20 @@ async def search_traffic_logs(
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
-        srcip: Source IP address filter
-        dstip: Destination IP address filter
-        srcport: Source port filter
-        dstport: Destination port filter
-        action: Action filter ("accept", "deny", "drop", "close")
+        srcip: Source IP or CIDR filter. Single value or list for OR matching
+            (e.g. ["10.0.0.1", "10.0.0.2"]).
+        dstip: Destination IP or CIDR filter. Single value or list for OR matching.
+        srcport: Source port filter. Single value or list for OR matching
+            (e.g. [22, 3389]).
+        dstport: Destination port filter. Single value or list for OR matching
+            (e.g. [80, 443, 8080]).
+        action: Action filter. Single value or list for OR matching
+            (e.g. ["deny", "drop"]). Valid: "accept", "deny", "drop", "close",
+            "ip-conn", "timeout".
         policy_id: Policy ID filter
-        device: Device filter (serial number like "FG100FTK19001333" or name like "myfw01")
+        device: Device filter. Serial number, name, or a list / comma-separated
+            string of serials for HA clusters (e.g. "FG100FTK00000001,FG100FTK00000002"
+            or ["FG100FTK00000001", "FG100FTK00000002"]).
         time_range: Time range (default: "1-hour")
         limit: Maximum logs to return (default: 100)
         timeout: Search timeout in seconds (default: 60)
@@ -1181,15 +1189,15 @@ async def search_traffic_logs(
         # interpolation to prevent filter injection.
         filters = []
         if srcip:
-            filters.append(f"srcip=={validate_ip_or_cidr(srcip, 'srcip')}")
+            filters.append(build_or_filter("srcip", srcip, lambda v: validate_ip_or_cidr(v, "srcip")))
         if dstip:
-            filters.append(f"dstip=={validate_ip_or_cidr(dstip, 'dstip')}")
+            filters.append(build_or_filter("dstip", dstip, lambda v: validate_ip_or_cidr(v, "dstip")))
         if srcport:
-            filters.append(f"srcport=={validate_port(srcport, 'srcport')}")
+            filters.append(build_or_filter("srcport", srcport, lambda v: validate_port(v, "srcport")))
         if dstport:
-            filters.append(f"dstport=={validate_port(dstport, 'dstport')}")
+            filters.append(build_or_filter("dstport", dstport, lambda v: validate_port(v, "dstport")))
         if action:
-            filters.append(f"action=={validate_traffic_action(action)}")
+            filters.append(build_or_filter("action", action, validate_traffic_action))
         if policy_id:
             if isinstance(policy_id, bool) or not isinstance(policy_id, int) or policy_id < 0:
                 raise ValidationError(
@@ -1236,10 +1244,10 @@ async def search_traffic_logs(
 async def search_security_logs(
     adom: str | None = None,
     attack_name: str | None = None,
-    severity: str | None = None,
-    srcip: str | None = None,
-    dstip: str | None = None,
-    device: str | None = None,
+    severity: str | list[str] | None = None,
+    srcip: str | list[str] | None = None,
+    dstip: str | list[str] | None = None,
+    device: str | list[str] | None = None,
     time_range: str = "24-hour",
     limit: int = 100,
     timeout: int = DEFAULT_SEARCH_TIMEOUT,
@@ -1252,10 +1260,13 @@ async def search_security_logs(
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
         attack_name: Attack/signature name filter
-        severity: Severity filter ("critical", "high", "medium", "low", "info")
-        srcip: Source IP address filter
-        dstip: Destination IP address filter
-        device: Device filter (serial number like "FG100FTK19001333" or name like "myfw01")
+        severity: Severity filter. Single value or list for OR matching
+            (e.g. ["critical", "high"]). Valid: "critical", "high", "medium",
+            "low", "info".
+        srcip: Source IP or CIDR filter. Single value or list for OR matching.
+        dstip: Destination IP or CIDR filter. Single value or list for OR matching.
+        device: Device filter. Serial number, name, or a list / comma-separated
+            string of serials for HA clusters.
         time_range: Time range (default: "24-hour")
         limit: Maximum logs to return (default: 100)
         timeout: Search timeout in seconds (default: 60)
@@ -1284,11 +1295,11 @@ async def search_security_logs(
         if attack_name:
             filters.append(f"attack contain {sanitize_filter_value(attack_name, 'attack_name')}")
         if severity:
-            filters.append(f"severity=={validate_severity(severity)}")
+            filters.append(build_or_filter("severity", severity, validate_severity))
         if srcip:
-            filters.append(f"srcip=={validate_ip_or_cidr(srcip, 'srcip')}")
+            filters.append(build_or_filter("srcip", srcip, lambda v: validate_ip_or_cidr(v, "srcip")))
         if dstip:
-            filters.append(f"dstip=={validate_ip_or_cidr(dstip, 'dstip')}")
+            filters.append(build_or_filter("dstip", dstip, lambda v: validate_ip_or_cidr(v, "dstip")))
 
         filter_str = " and ".join(filters) if filters else None
 

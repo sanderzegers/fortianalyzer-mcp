@@ -311,7 +311,7 @@ def validate_device_serial(serial: str) -> str:
 _DEVICE_SERIAL_PREFIXES = ("FG", "FM", "FW", "FA", "FS", "FD", "FP", "FC", "FV")
 
 
-def build_device_filter(device: str | None) -> list[dict[str, str]]:
+def build_device_filter(device: str | list[str] | None) -> list[dict[str, str]]:
     """Build the FortiAnalyzer ``device`` filter array for a logview search.
 
     This is the single source of truth shared by the log, traffic, and pcap
@@ -319,13 +319,18 @@ def build_device_filter(device: str | None) -> list[dict[str, str]]:
     device filter; without one, searches return zero results.
 
     Args:
-        device: Device serial number (e.g. ``"FG100FTK19001333"``), device name
-            (optionally ``"name[vdom]"``), an ``"All_*"`` device group, or
-            ``None`` to default to all FortiGate devices.
+        device: One or more device identifiers. Accepts:
+            - ``None``: defaults to all FortiGate devices.
+            - A single serial number (e.g. ``"FG100FTK19001333"``).
+            - A comma-separated string of serials (e.g. ``"FG001,FG002"``),
+              useful for HA clusters where logs may be stored under either member.
+            - A list of serial numbers or device names.
+            - A device name (optionally ``"name[vdom]"``).
+            - An ``"All_*"`` device group string.
 
     Returns:
-        A device-filter list, one of ``[{"devid": ...}]`` or
-        ``[{"devname": ...}]``, ready to pass as the ``device`` parameter.
+        A device-filter list with one entry per device, ready to pass as the
+        ``device`` parameter to the FAZ logview API.
 
     Note:
         Serial-looking values (``FG``/``FM``/... prefixes) and ``All_*`` groups
@@ -334,11 +339,45 @@ def build_device_filter(device: str | None) -> list[dict[str, str]]:
     if not device:
         # FAZ rejects an empty device filter with 0 results; default to all FGTs.
         return [{"devid": "All_FortiGate"}]
-    if device.startswith(_DEVICE_SERIAL_PREFIXES):
-        return [{"devid": device}]
-    if device.startswith("All_"):
-        return [{"devid": device}]
-    return [{"devname": device}]
+
+    devices: list[str] = device if isinstance(device, list) else [d.strip() for d in device.split(",")]
+    result: list[dict[str, str]] = []
+    for d in devices:
+        d = d.strip()
+        if not d:
+            continue
+        if d.startswith(_DEVICE_SERIAL_PREFIXES) or d.startswith("All_"):
+            result.append({"devid": d})
+        else:
+            result.append({"devname": d})
+
+    return result if result else [{"devid": "All_FortiGate"}]
+
+
+def build_or_filter(field: str, values: Any, validator_fn) -> str:
+    """Build a FAZ filter clause for one or more values joined with OR.
+
+    Single value:   ``field==value``
+    Multiple values: ``(field==val1 or field==val2)``
+
+    Each value is passed through ``validator_fn`` before interpolation.
+
+    Args:
+        field: FAZ filter field name (e.g. ``"srcip"``).
+        values: A single value or a list of values.
+        validator_fn: Callable that validates/normalises a single value and
+            returns the safe string or int to embed in the filter expression.
+
+    Returns:
+        A filter clause string safe for use in a FAZ log filter expression.
+    """
+    if not isinstance(values, list):
+        values = [values]
+    validated = [validator_fn(v) for v in values]
+    if len(validated) == 1:
+        return f"{field}=={validated[0]}"
+    parts = [f"{field}=={v}" for v in validated]
+    return f"({' or '.join(parts)})"
 
 
 def validate_log_type(logtype: str) -> str:
