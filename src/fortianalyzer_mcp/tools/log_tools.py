@@ -18,6 +18,7 @@ from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
     build_device_filter,
+    build_or_filter,
     get_default_adom,
     sanitize_filter_value,
     validate_adom,
@@ -1268,15 +1269,15 @@ def _extract_log_time(log: dict[str, Any]) -> "datetime | None":
 @mcp.tool()
 async def summarize_traffic_logs(
     adom: str | None = None,
-    srcip: str | None = None,
-    dstip: str | None = None,
-    srcport: int | None = None,
-    dstport: int | None = None,
+    srcip: str | list[str] | None = None,
+    dstip: str | list[str] | None = None,
+    srcport: int | list[int] | None = None,
+    dstport: int | list[int] | None = None,
     srcintf: str | None = None,
     dstintf: str | None = None,
-    action: str | None = None,
+    action: str | list[str] | None = None,
     policy_id: int | None = None,
-    device: str | None = None,
+    device: str | list[str] | None = None,
     time_range: str = "1-hour",
     group_by: list[str] | str = "dstip",
     sum_fields: list[str] | None = None,
@@ -1302,15 +1303,18 @@ async def summarize_traffic_logs(
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
-        srcip: Source IP address filter
-        dstip: Destination IP address filter
-        srcport: Source port filter
-        dstport: Destination port filter
+        srcip: Source IP or CIDR filter. Single value or list for OR matching.
+        dstip: Destination IP or CIDR filter. Single value or list for OR matching.
+        srcport: Source port filter. Single value or list for OR matching.
+        dstport: Destination port filter. Single value or list for OR matching
+            (e.g. [80, 443, 8080]).
         srcintf: Source interface filter (e.g. "VLAN405", "port1")
         dstintf: Destination interface filter (e.g. "wan1", "port2")
-        action: Action filter ("accept", "deny", "drop", "close")
+        action: Action filter. Single value or list for OR matching
+            (e.g. ["deny", "drop"]).
         policy_id: Policy ID filter
-        device: Device filter (serial number or name)
+        device: Device filter. Serial number, name, or list/comma-separated
+            string of serials for HA clusters.
         time_range: Time range (default: "1-hour")
         group_by: Field name or list of field names to group by.
             Valid fields: dstip, srcip, dstport, srcport, action, app,
@@ -1387,19 +1391,19 @@ async def summarize_traffic_logs(
 
         filters = []
         if srcip:
-            filters.append(f"srcip=={validate_ip_or_cidr(srcip, 'srcip')}")
+            filters.append(build_or_filter("srcip", srcip, lambda v: validate_ip_or_cidr(v, "srcip")))
         if dstip:
-            filters.append(f"dstip=={validate_ip_or_cidr(dstip, 'dstip')}")
+            filters.append(build_or_filter("dstip", dstip, lambda v: validate_ip_or_cidr(v, "dstip")))
         if srcport:
-            filters.append(f"srcport=={validate_port(srcport, 'srcport')}")
+            filters.append(build_or_filter("srcport", srcport, lambda v: validate_port(v, "srcport")))
         if dstport:
-            filters.append(f"dstport=={validate_port(dstport, 'dstport')}")
+            filters.append(build_or_filter("dstport", dstport, lambda v: validate_port(v, "dstport")))
         if srcintf:
             filters.append(f"srcintf=={sanitize_filter_value(srcintf, 'srcintf')}")
         if dstintf:
             filters.append(f"dstintf=={sanitize_filter_value(dstintf, 'dstintf')}")
         if action:
-            filters.append(f"action=={validate_traffic_action(action)}")
+            filters.append(build_or_filter("action", action, validate_traffic_action))
         if policy_id:
             if isinstance(policy_id, bool) or not isinstance(policy_id, int) or policy_id < 0:
                 raise ValidationError(
