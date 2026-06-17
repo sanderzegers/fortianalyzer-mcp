@@ -329,3 +329,92 @@ class TestSevenAndThirtyDayFlows:
 
         assert r["status"] == "success"
         assert "action==deny" in (fake.start_calls[0]["filter"] or "")
+
+
+def _traffic_rows(n: int) -> list[dict[str, object]]:
+    """Generate fake traffic log rows with realistic fields."""
+    rows = []
+    for i in range(n):
+        rows.append({
+            "srcip": f"10.0.0.{i % 10}",
+            "dstip": f"1.2.3.{i % 5}",
+            "dstport": 80 + (i % 3),
+            "action": "deny" if i % 3 == 0 else "accept",
+            "sentbyte": 100 * (i + 1),
+            "rcvdbyte": 50 * (i + 1),
+            "date": "2024-01-01",
+            "time": f"{i % 24:02d}:00:00",
+        })
+    return rows
+
+
+class TestSummarizeTrafficLogs:
+    async def test_single_field_grouping(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = ContractFaz(page=_traffic_rows(10), total=10)
+        _install(monkeypatch, fake)
+
+        r = await log_tools.summarize_traffic_logs(
+            adom="root", group_by="dstip", time_range=CUSTOM_RANGE
+        )
+
+        assert r["status"] == "success"
+        assert r["group_by"] == ["dstip"]
+        assert r["logs_scanned"] == 10
+        assert len(r["results"]) <= r["top_n"]
+        assert all("dstip" in row and "count" in row for row in r["results"])
+
+    async def test_sum_fields_accumulated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = ContractFaz(page=_traffic_rows(6), total=6)
+        _install(monkeypatch, fake)
+
+        r = await log_tools.summarize_traffic_logs(
+            adom="root",
+            group_by="action",
+            sum_fields=["sentbyte", "rcvdbyte"],
+            time_range=CUSTOM_RANGE,
+        )
+
+        assert r["status"] == "success"
+        assert r["sum_fields"] == ["sentbyte", "rcvdbyte"]
+        for row in r["results"]:
+            assert "sentbyte" in row
+            assert "rcvdbyte" in row
+            assert row["sentbyte"] >= 0
+
+    async def test_multi_field_group_by(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = ContractFaz(page=_traffic_rows(8), total=8)
+        _install(monkeypatch, fake)
+
+        r = await log_tools.summarize_traffic_logs(
+            adom="root",
+            group_by=["dstip", "dstport"],
+            time_range=CUSTOM_RANGE,
+        )
+
+        assert r["status"] == "success"
+        assert r["group_by"] == ["dstip", "dstport"]
+        for row in r["results"]:
+            assert "dstip" in row
+            assert "dstport" in row
+            assert "count" in row
+
+    async def test_invalid_group_by_returns_error(self) -> None:
+        r = await log_tools.summarize_traffic_logs(
+            adom="root", group_by="not_a_valid_field", time_range=CUSTOM_RANGE
+        )
+
+        assert r["status"] == "error"
+        assert r["error"] == "validation_error"
+        assert "group_by" in r["message"]
+
+    async def test_invalid_sum_fields_returns_error(self) -> None:
+        r = await log_tools.summarize_traffic_logs(
+            adom="root",
+            group_by="dstip",
+            sum_fields=["not_a_valid_sum_field"],
+            time_range=CUSTOM_RANGE,
+        )
+
+        assert r["status"] == "error"
+        assert r["error"] == "validation_error"
+        assert "sum_fields" in r["message"]

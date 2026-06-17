@@ -7,6 +7,7 @@ Implements the two-step TID-based log search workflow.
 import asyncio
 import logging
 import math
+from collections import Counter, defaultdict
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
@@ -61,6 +62,14 @@ _LOGSEARCH_SEMAPHORE = asyncio.Semaphore(LOGSEARCH_CONCURRENCY_LIMIT)
 # non-delivered exit cannot meaningfully extend the concurrency-slot hold past
 # the search's own timeout budget.
 _CLEANUP_CANCEL_TIMEOUT = 2.0
+
+# Fields valid for summarize_traffic_logs group_by and sum_fields parameters.
+_VALID_GROUP_BY_FIELDS = frozenset({
+    "dstip", "srcip", "dstport", "srcport", "action",
+    "app", "service", "dstintf", "srcintf", "policyid",
+    "proto", "dstcountry", "srccountry", "devname", "dstname",
+})
+_VALID_SUM_FIELDS = frozenset({"sentbyte", "rcvdbyte", "duration"})
 
 
 # In-process registry of log-search context, keyed by a pagination handle.
@@ -1227,6 +1236,296 @@ async def search_traffic_logs(
             error="faz_operation_failed",
             message=str(e),
             operation="search_traffic_logs",
+            adom=adom,
+            retry_count=getattr(e, "retries_attempted", 0),
+        )
+
+
+def _extract_log_time(log: dict[str, Any]) -> "datetime | None":
+    """Return a naive datetime from a FAZ log entry, or None if unparseable.
+
+    FAZ traffic logs carry 'date' (YYYY-MM-DD) and 'time' (HH:MM:SS) as
+    separate string fields. Falls back to 'itime' (integer epoch seconds).
+    """
+    from datetime import datetime as _dt
+
+    date_str = log.get("date")
+    time_str = log.get("time")
+    if date_str and time_str:
+        try:
+            return _dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+    itime = log.get("itime")
+    if itime:
+        try:
+            return _dt.fromtimestamp(int(itime))
+        except (ValueError, OSError):
+            pass
+    return None
+
+
+@mcp.tool()
+async def summarize_traffic_logs(
+    adom: str | None = None,
+    srcip: str | None = None,
+    dstip: str | None = None,
+    srcport: int | None = None,
+    dstport: int | None = None,
+    srcintf: str | None = None,
+    dstintf: str | None = None,
+    action: str | None = None,
+    policy_id: int | None = None,
+    device: str | None = None,
+    time_range: str = "1-hour",
+    group_by: list[str] | str = "dstip",
+    sum_fields: list[str] | None = None,
+    top_n: int = 50,
+    max_logs: int = 1000,
+    scan_timeout: int = 55,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    """Fetch traffic logs and return a ranked aggregation summary.
+
+    Fetches up to max_logs raw log entries matching the given filters (using
+    paginated 1000-log FAZ pages under the hood), groups them server-side by
+    one or more fields, and returns the top_n groups sorted by count descending.
+    Optionally sums numeric fields (sentbyte, rcvdbyte, duration) per group.
+
+    Use this instead of search_traffic_logs when you need unique values,
+    counts, or a ranked breakdown rather than raw log entries.
+
+    With the default max_logs=1000 the call returns in seconds (single page).
+    Pass a higher max_logs to scan the full dataset — each additional 1000 logs
+    adds roughly 1–2 seconds; a scan_timeout backstop (default 55 s) stops
+    pagination early and sets scan_truncated=True in the result if hit.
+
+    Args:
+        adom: ADOM name (default: from config DEFAULT_ADOM)
+        srcip: Source IP address filter
+        dstip: Destination IP address filter
+        srcport: Source port filter
+        dstport: Destination port filter
+        srcintf: Source interface filter (e.g. "VLAN405", "port1")
+        dstintf: Destination interface filter (e.g. "wan1", "port2")
+        action: Action filter ("accept", "deny", "drop", "close")
+        policy_id: Policy ID filter
+        device: Device filter (serial number or name)
+        time_range: Time range (default: "1-hour")
+        group_by: Field name or list of field names to group by.
+            Valid fields: dstip, srcip, dstport, srcport, action, app,
+            service, dstintf, srcintf, policyid, proto, dstcountry,
+            srccountry, devname, dstname. Defaults to "dstip".
+        sum_fields: Optional list of numeric fields to sum per group.
+            Valid fields: sentbyte, rcvdbyte, duration.
+        top_n: Number of top groups to return (default: 50)
+        max_logs: Total logs to scan across all pages (default: 1000).
+            Values above 1000 trigger paginated fetching. Each 1000-log page
+            adds ~1–2 s. Capped at 500,000.
+        scan_timeout: Wall-clock budget in seconds for additional pages beyond
+            the first (default: 55). Together with the 30s per-page timeout
+            this keeps total execution under ~90s.
+        timeout: Per-page FAZ search timeout in seconds (default: 30).
+
+    Returns:
+        dict with keys:
+            - status: "success" or "error"
+            - group_by: list of field names used for grouping
+            - sum_fields: list of summed fields (empty if none)
+            - logs_scanned: total raw logs processed across all pages
+            - total_matched: total logs matching the filter in FAZ (may be None)
+            - total_is_known: whether total_matched is authoritative
+            - has_more: True if FAZ has more matching logs beyond logs_scanned
+            - scan_truncated: True if scan_timeout fired before reaching max_logs
+            - unique_count: total unique groups found before top_n cut
+            - top_n: the top_n value used
+            - results: list of dicts, each with group fields + "count" +
+                       any sum_fields values, sorted by count desc
+            - filter_applied: filter string used
+            - time_range: resolved time bounds sent to FAZ
+            - scan_start_time: earliest log timestamp seen (YYYY-MM-DD HH:MM:SS)
+            - scan_end_time: latest log timestamp seen (YYYY-MM-DD HH:MM:SS)
+
+    Example:
+        >>> result = await summarize_traffic_logs(
+        ...     srcintf="VLAN405",
+        ...     action="deny",
+        ...     group_by=["dstip", "dstname"],
+        ...     time_range="3-day",
+        ... )
+        >>> result = await summarize_traffic_logs(
+        ...     srcintf="VLAN405",
+        ...     action="deny",
+        ...     group_by=["dstip", "dstname"],
+        ...     time_range="3-day",
+        ...     max_logs=200000,
+        ... )
+    """
+    try:
+        adom = adom or get_default_adom()
+
+        if isinstance(group_by, str):
+            group_by = [group_by]
+        invalid_group = set(group_by) - _VALID_GROUP_BY_FIELDS
+        if invalid_group:
+            raise ValidationError(
+                f"Invalid group_by field(s): {sorted(invalid_group)}. "
+                f"Valid fields: {sorted(_VALID_GROUP_BY_FIELDS)}"
+            )
+
+        if sum_fields:
+            invalid_sum = set(sum_fields) - _VALID_SUM_FIELDS
+            if invalid_sum:
+                raise ValidationError(
+                    f"Invalid sum_fields: {sorted(invalid_sum)}. "
+                    f"Valid fields: {sorted(_VALID_SUM_FIELDS)}"
+                )
+
+        if not isinstance(max_logs, int) or isinstance(max_logs, bool) or max_logs < 1:
+            max_logs = 1000
+        max_logs = min(max_logs, 500_000)
+
+        filters = []
+        if srcip:
+            filters.append(f"srcip=={validate_ip_or_cidr(srcip, 'srcip')}")
+        if dstip:
+            filters.append(f"dstip=={validate_ip_or_cidr(dstip, 'dstip')}")
+        if srcport:
+            filters.append(f"srcport=={validate_port(srcport, 'srcport')}")
+        if dstport:
+            filters.append(f"dstport=={validate_port(dstport, 'dstport')}")
+        if srcintf:
+            filters.append(f"srcintf=={sanitize_filter_value(srcintf, 'srcintf')}")
+        if dstintf:
+            filters.append(f"dstintf=={sanitize_filter_value(dstintf, 'dstintf')}")
+        if action:
+            filters.append(f"action=={validate_traffic_action(action)}")
+        if policy_id:
+            if isinstance(policy_id, bool) or not isinstance(policy_id, int) or policy_id < 0:
+                raise ValidationError(
+                    f"Invalid policy_id '{policy_id}'. Must be a non-negative integer."
+                )
+            filters.append(f"policyid=={policy_id}")
+
+        filter_str = " and ".join(filters) if filters else None
+
+        counts: Counter = Counter()
+        sums: dict = defaultdict(lambda: {f: 0 for f in (sum_fields or [])})
+        logs_scanned = 0
+        scan_min_time: Any = None
+        scan_max_time: Any = None
+
+        def _accumulate(logs: list) -> None:
+            nonlocal scan_min_time, scan_max_time
+            for log in logs:
+                if len(group_by) == 1:
+                    key = str(log.get(group_by[0], "(unknown)"))
+                else:
+                    key = tuple(str(log.get(f, "(unknown)")) for f in group_by)
+                counts[key] += 1
+                if sum_fields:
+                    for sf in sum_fields:
+                        raw = log.get(sf, 0)
+                        try:
+                            sums[key][sf] += int(raw) if raw else 0
+                        except (ValueError, TypeError):
+                            pass
+                t = _extract_log_time(log)
+                if t is not None:
+                    if scan_min_time is None or t < scan_min_time:
+                        scan_min_time = t
+                    if scan_max_time is None or t > scan_max_time:
+                        scan_max_time = t
+
+        result = await query_logs(
+            adom=adom,
+            logtype="traffic",
+            device=device,
+            time_range=time_range,
+            filter=filter_str,
+            limit=LOG_FETCH_LIMIT_MAX,
+            timeout=timeout,
+        )
+
+        if result.get("status") != "success":
+            return result
+
+        _accumulate(result.get("logs", []))
+        logs_scanned += len(result.get("logs", []))
+        total_matched = result.get("total")
+        total_is_known = result.get("total_is_known", False)
+        has_more = result.get("has_more", False)
+        time_range_resolved = result.get("time_range")
+        tid = result.get("tid")
+        scan_truncated = False
+
+        if max_logs > LOG_FETCH_LIMIT_MAX and has_more and tid:
+            loop = asyncio.get_event_loop()
+            deadline = loop.time() + scan_timeout
+            while has_more and logs_scanned < max_logs:
+                remaining_scan = deadline - loop.time()
+                if remaining_scan <= 0:
+                    scan_truncated = True
+                    break
+                page = await fetch_more_logs(
+                    adom=adom,
+                    tid=tid,
+                    limit=min(LOG_FETCH_LIMIT_MAX, max_logs - logs_scanned),
+                    offset=logs_scanned,
+                    timeout=min(timeout, max(1, int(remaining_scan))),
+                )
+                if page.get("status") != "success":
+                    break
+                page_logs = page.get("logs", [])
+                if not page_logs:
+                    break
+                _accumulate(page_logs)
+                logs_scanned += len(page_logs)
+                has_more = page.get("has_more", False)
+
+        rows = []
+        for key, count in counts.most_common(top_n):
+            if isinstance(key, tuple):
+                row = dict(zip(group_by, key))
+            else:
+                row = {group_by[0]: key}
+            row["count"] = count
+            if sum_fields:
+                row.update(sums[key])
+            rows.append(row)
+
+        _fmt = "%Y-%m-%d %H:%M:%S"
+        return {
+            "status": "success",
+            "group_by": group_by,
+            "sum_fields": sum_fields or [],
+            "logs_scanned": logs_scanned,
+            "total_matched": total_matched,
+            "total_is_known": total_is_known,
+            "has_more": has_more,
+            "scan_truncated": scan_truncated,
+            "unique_count": len(counts),
+            "top_n": top_n,
+            "results": rows,
+            "filter_applied": filter_str or "none",
+            "time_range": time_range_resolved,
+            "scan_start_time": scan_min_time.strftime(_fmt) if scan_min_time else None,
+            "scan_end_time": scan_max_time.strftime(_fmt) if scan_max_time else None,
+        }
+
+    except ValidationError as e:
+        return error_response(
+            error="validation_error",
+            message=f"Validation error: {e}",
+            operation="summarize_traffic_logs",
+            adom=adom,
+        )
+    except Exception as e:
+        logger.error(f"Failed to summarize traffic logs: {e}")
+        return error_response(
+            error="faz_operation_failed",
+            message=str(e),
+            operation="summarize_traffic_logs",
             adom=adom,
             retry_count=getattr(e, "retries_attempted", 0),
         )
