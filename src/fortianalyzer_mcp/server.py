@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import inspect
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -196,23 +197,12 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             "tools": results,
         }
 
-    @mcp_server.tool()
-    async def execute_advanced_tool(
-        tool_name: str,
-        parameters: dict | None = None,
-    ) -> Any:
-        """Execute a FortiAnalyzer operation dynamically by tool name.
+    def _build_tool_map() -> dict:
+        """Build the name→function map used by execute_advanced_tool and get_tool_schema.
 
-        Args:
-            tool_name: Name of the tool to execute
-            parameters: Dictionary of parameters for the tool
-
-        Returns:
-            Tool execution result
+        Defined once here so both tools stay in sync automatically: adding a new
+        tool to this function is the only registration step required.
         """
-        params = parameters or {}
-
-        # Import tools dynamically and execute
         from fortianalyzer_mcp.tools import (
             dvm_tools,
             event_tools,
@@ -226,8 +216,7 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             traffic_tools,
         )
 
-        # Map tool names to functions
-        tool_map = {
+        return {
             # System tools
             "get_system_status": system_tools.get_system_status,
             "get_ha_status": system_tools.get_ha_status,
@@ -313,6 +302,23 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             "get_policy_protocol_summary": traffic_tools.get_policy_protocol_summary,
         }
 
+    @mcp_server.tool()
+    async def execute_advanced_tool(
+        tool_name: str,
+        parameters: dict | None = None,
+    ) -> Any:
+        """Execute a FortiAnalyzer operation dynamically by tool name.
+
+        Args:
+            tool_name: Name of the tool to execute
+            parameters: Dictionary of parameters for the tool
+
+        Returns:
+            Tool execution result
+        """
+        params = parameters or {}
+        tool_map = _build_tool_map()
+
         if tool_name not in tool_map:
             return {
                 "status": "error",
@@ -322,6 +328,52 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
 
         tool_func = tool_map[tool_name]
         return await tool_func(**params)
+
+    @mcp_server.tool()
+    def get_tool_schema(tool_name: str) -> dict[str, Any]:
+        """Get the parameter schema for a FortiAnalyzer tool before calling execute_advanced_tool.
+
+        Always call this before execute_advanced_tool when you are unsure of the
+        required parameters. Returns parameter names, types, defaults, and the
+        tool docstring.
+
+        Args:
+            tool_name: Name of the tool (as returned by find_fortianalyzer_tool)
+
+        Returns:
+            Parameter schema with names, types, defaults, and docstring
+        """
+        tool_map = _build_tool_map()
+
+        if tool_name not in tool_map:
+            return {
+                "status": "error",
+                "message": f"Unknown tool: {tool_name}",
+                "available_tools": list(tool_map.keys()),
+            }
+
+        func = tool_map[tool_name]
+        sig = inspect.signature(func)
+        params = []
+        for name, param in sig.parameters.items():
+            if name == "self":
+                continue
+            entry: dict[str, Any] = {"name": name}
+            if param.annotation is not inspect.Parameter.empty:
+                entry["type"] = str(param.annotation)
+            if param.default is not inspect.Parameter.empty:
+                entry["default"] = param.default
+                entry["required"] = False
+            else:
+                entry["required"] = True
+            params.append(entry)
+
+        return {
+            "status": "success",
+            "tool": tool_name,
+            "parameters": params,
+            "docstring": inspect.getdoc(func) or "",
+        }
 
     @mcp_server.tool()
     def list_fortianalyzer_categories() -> dict[str, Any]:
