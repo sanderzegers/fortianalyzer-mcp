@@ -97,6 +97,9 @@ value or a list. A list produces an OR-joined filter clause:
 `policy_id` and `srcintf`/`dstintf` are single-value only — use `query_logs` with a manual
 `filter` string if you need OR logic on those fields.
 
+**Always pass lists as proper JSON arrays, not as strings.**
+Correct: `dstport=[53, 443]` — Incorrect: `dstport="[53, 443]"`
+
 For other fields (e.g. `logid`, `policyname`, `devname`), use `query_logs` with the `filter` parameter.
 
 ## Aggregation queries
