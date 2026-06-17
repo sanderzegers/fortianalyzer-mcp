@@ -52,6 +52,8 @@ within the default ADOM.
 | Count, group, or find unique values across traffic logs | `summarize_traffic_logs` |
 | Bandwidth-weighted rankings across all traffic (no action filter needed) | FortiView tools (`get_top_destinations`, `get_top_sources`, etc.) |
 | Security / IPS / threat logs | `search_security_logs` |
+| DNS, AV, webfilter, app-ctrl, SSL, DLP, or other UTM logs (raw) | `search_utm_logs` |
+| Top queried domains, blocked sites, detected threats, top apps — UTM aggregation | `summarize_utm_logs` |
 | Tool name unknown | `find_fortianalyzer_tool("keyword")` then `get_tool_schema` |
 
 ## query_logs filter syntax
@@ -170,6 +172,106 @@ Use these when you need bandwidth-weighted rankings across all traffic (not filt
 Raw log fetches are hard-capped at 1000 rows regardless of the `limit` value.
 Do not retry with a higher limit — it returns the same 1000 rows. Use `summarize_traffic_logs`
 or narrow the filter instead.
+
+## Progressive investigation workflow
+
+When presenting IP address results from `summarize_traffic_logs` or `search_traffic_logs`,
+proactively offer the user a way to narrow down by excluding already-known addresses.
+
+After each result set, add a follow-up suggestion:
+> "Want me to exclude any of these from the next query to focus on unknown addresses?
+> Just tell me which ones to skip."
+
+When the user confirms, build exclusions using `!=` in a `query_logs` filter:
+```
+dstip!=1.2.3.4 and dstip!=5.6.7.8
+```
+
+For `summarize_traffic_logs`, combine the exclusions with any existing filters by passing
+them through `query_logs` directly, or append them to the `filter` parameter.
+
+Keep a running exclusion list across turns so the user never has to repeat addresses
+they've already dismissed — each round removes the known IPs and surfaces new ones.
+
+## UTM log queries
+
+UTM/security-inspection logs (DNS filter, AV, web filter, app control, SSL inspection, etc.)
+are each indexed as their own log type in FortiAnalyzer (`"dns"`, `"webfilter"`, `"virus"`,
+`"app-ctrl"`, etc.). Use `search_utm_logs` and `summarize_utm_logs` for a convenient interface
+with built-in validation; or call `query_logs` directly with the appropriate logtype.
+
+### search_utm_logs — raw UTM log entries
+
+Key parameters:
+- `logtype`: Which UTM category to search. Options:
+  - `"dns"` — DNS filter logs (qname, resolved IPs, pass/block/monitor actions)
+  - `"webfilter"` — Web filter logs (URLs, categories, hostname)
+  - `"virus"` — Antivirus/malware detection
+  - `"app-ctrl"` — Application control
+  - `"ssl"` — SSL/TLS inspection
+  - `"dlp"` — Data loss prevention
+  - `"voip"` — VoIP/SIP security
+  - `"file-filter"` — File filter
+  - `"icap"` — ICAP server logs
+  - `"virtual-patch"` — Virtual patching
+  - `"anomaly"` — DoS anomaly
+  - `"utm"` — All UTM events (no subtype filter)
+- `srcip` / `dstip`: Source/destination IP or CIDR
+- `action`: Pass/block/monitor — values vary by logtype (e.g. DNS: `"pass"`, `"block"`, `"monitor"`)
+- `filter`: Raw FAZ filter for logtype-specific fields not covered above:
+  - DNS: `'qname contain example.com'`, `'qtype==A'`, `'ipaddr==1.2.3.4'`
+  - Webfilter: `'hostname contain example.com'`, `'cat==52'`
+  - AV: `'virus contain eicar'`, `'filename contain invoice'`
+  - App-ctrl: `'app==Zoom'`, `'appcat==Video/Audio'`
+  - SSL: `'sni contain google.com'`
+
+Examples:
+```
+# DNS queries for a domain from a specific client
+search_utm_logs(logtype="dns", srcip="192.168.1.100", filter='qname contain example.com')
+
+# Blocked DNS queries in the last hour
+search_utm_logs(logtype="dns", action="block", time_range="1-hour")
+
+# Blocked websites for a VLAN
+search_utm_logs(logtype="webfilter", action="blocked", srcip="192.168.50.0/24")
+
+# AV detections
+search_utm_logs(logtype="virus", time_range="7-day")
+```
+
+### summarize_utm_logs — aggregated UTM analysis
+
+Same filters as `search_utm_logs`, plus:
+- `group_by`: Field or list of fields to group by. Common per logtype:
+  - DNS: `"qname"` (top queried domains), `"ipaddr"`, `"qtype"`, `"catdesc"`
+  - Webfilter: `"hostname"`, `["srcip", "hostname"]`, `"catdesc"`
+  - AV: `"virus"`, `["srcip", "virus"]`
+  - App-ctrl: `"app"`, `["app", "appcat"]`
+  - SSL: `"sni"`
+  - Any type: `"srcip"`, `"dstip"`, `"action"`, `"devname"`, `"policyid"`, `"srccountry"`, `"dstcountry"`
+- `sum_fields`: `["sentbyte", "rcvdbyte"]` for bandwidth totals per group
+- `top_n`: Groups to return (default 50)
+- `max_logs`: Logs to scan (default 1000; increase for deeper analysis — each 1000 ≈ 1–2 s)
+
+Follow the same **two-step workflow** as `summarize_traffic_logs`:
+1. Quick scan with default `max_logs=1000` — report coverage (`scan_start_time` → `scan_end_time`)
+2. If `has_more: true`, offer a full scan before running it
+
+Examples:
+```
+# Top queried DNS domains
+summarize_utm_logs(logtype="dns", group_by="qname", time_range="24-hour")
+
+# Top blocked websites with source IP breakdown
+summarize_utm_logs(logtype="webfilter", action="blocked", group_by=["srcip","hostname"])
+
+# Top AV threats detected
+summarize_utm_logs(logtype="virus", group_by=["virus","srcip"], time_range="7-day")
+
+# Top apps by bandwidth
+summarize_utm_logs(logtype="app-ctrl", group_by="app", sum_fields=["sentbyte","rcvdbyte"])
+```
 
 ## Time-scoped analysis (today vs yesterday)
 Rolling presets (`1-day`, `2-day`, etc.) always end at **now**. They cannot isolate a
