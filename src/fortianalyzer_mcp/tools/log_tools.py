@@ -445,11 +445,21 @@ async def query_logs(
             - "traffic": Firewall traffic logs
             - "event": System event logs
             - "attack": IPS/IDS attack logs
-            - "virus": Antivirus logs
+            - "virus": Antivirus/AV logs
             - "webfilter": Web filter logs
             - "app-ctrl": Application control logs
-            - "dlp": DLP logs
+            - "dlp": Data loss prevention logs
             - "emailfilter": Email filter logs
+            - "dns": DNS filter logs (blocked/allowed queries, resolved IPs)
+            - "utm": Generic UTM log category
+            - "anomaly": DoS anomaly logs
+            - "voip": VoIP/SIP security logs
+            - "ssl": SSL inspection logs
+            - "file-filter": File filter logs
+            - "icap": ICAP server logs
+            - "virtual-patch": Virtual patching logs
+            For UTM log types (dns, virus, webfilter, etc.) prefer
+            search_utm_logs which provides common filter parameters.
         device: Device filter (optional). Options:
             - Serial number (recommended): "FG100FTK19001333"
             - Device name: "myfw01" or "myfw01[root]" (with VDOM)
@@ -1411,6 +1421,151 @@ async def search_event_logs(
             error="faz_operation_failed",
             message=str(e),
             operation="search_event_logs",
+            adom=adom,
+            retry_count=getattr(e, "retries_attempted", 0),
+        )
+
+
+# UTM log types handled by search_utm_logs (excludes traffic/event/attack which
+# have their own dedicated tools).
+_UTM_LOG_TYPES = frozenset({
+    "dns", "virus", "webfilter", "app-ctrl", "dlp",
+    "voip", "ssl", "file-filter", "icap", "virtual-patch", "utm", "anomaly",
+})
+
+
+
+@mcp.tool()
+async def search_utm_logs(
+    adom: str | None = None,
+    logtype: str = "dns",
+    srcip: str | None = None,
+    dstip: str | None = None,
+    action: str | None = None,
+    level: str | None = None,
+    device: str | None = None,
+    time_range: str = "24-hour",
+    filter: str | None = None,
+    limit: int = 100,
+    timeout: int = DEFAULT_SEARCH_TIMEOUT,
+) -> dict[str, Any]:
+    """Search UTM/security-inspection logs (DNS, AV, web filter, app control, etc.).
+
+    Convenience wrapper around query_logs for UTM log categories. For IPS/attack
+    logs use search_security_logs; for traffic use search_traffic_logs; for system
+    events use search_event_logs.
+
+    Args:
+        adom: ADOM name (default: from config DEFAULT_ADOM)
+        logtype: UTM log category. Options:
+            - "dns": DNS filter logs (qname, resolved IPs, block/pass actions).
+                     Use filter="qname contain example.com" for domain searches.
+            - "virus": Antivirus/malware detection logs
+            - "webfilter": Web filter logs (URLs, categories)
+            - "app-ctrl": Application control logs
+            - "dlp": Data loss prevention logs
+            - "voip": VoIP/SIP security logs
+            - "ssl": SSL/TLS inspection logs
+            - "file-filter": File filter logs
+            - "icap": ICAP server logs
+            - "virtual-patch": Virtual patching logs
+            - "utm": Generic UTM category (unclassified UTM events)
+            - "anomaly": DoS anomaly logs
+        srcip: Source IP address filter (e.g. "192.168.1.100" or "192.168.1.0/24")
+        dstip: Destination IP address filter
+        action: Action filter. Values vary by logtype:
+            - DNS: "pass", "block", "redirect", "monitor"
+            - Webfilter: "passthrough", "blocked", "warning", "override"
+            - AV/virus: "passthrough", "blocked", "quarantined"
+            - App-ctrl: "pass", "block", "monitor"
+        level: Log level filter ("emergency", "alert", "critical", "error",
+            "warning", "notice", "information", "debug").
+        device: Device filter (serial number like "FG100FTK00000001" or name like "myfw01")
+        time_range: Time range (default: "24-hour")
+        filter: Additional raw FAZ filter expression appended with 'and' to any
+            generated filters. Use for logtype-specific fields not covered above:
+            - DNS:       'qname contain example.com', 'qtype==A', 'ipaddr==203.0.113.1'
+            - Webfilter: 'hostname contain example.com', 'cat==52'
+            - AV/virus:  'virus contain eicar', 'filename contain malware'
+        limit: Maximum logs to return (default: 100)
+        timeout: Search timeout in seconds (default: 60)
+
+    Returns:
+        dict: UTM log results (same structure as query_logs) plus:
+            - filter_applied: Filter string used
+
+    Example:
+        >>> # Find all blocked DNS queries in the last hour
+        >>> result = await search_utm_logs(logtype="dns", action="block", time_range="1-hour")
+        >>>
+        >>> # Find DNS queries for a specific domain from a client
+        >>> result = await search_utm_logs(
+        ...     logtype="dns",
+        ...     srcip="192.168.1.100",
+        ...     filter='qname contain example.com',
+        ... )
+        >>>
+        >>> # Find blocked webfilter events from a source IP
+        >>> result = await search_utm_logs(
+        ...     logtype="webfilter",
+        ...     srcip="192.168.1.100",
+        ...     action="blocked",
+        ... )
+    """
+    try:
+        adom = adom or get_default_adom()
+
+        logtype = logtype.strip().lower()
+        if logtype not in _UTM_LOG_TYPES:
+            raise ValidationError(
+                f"Invalid logtype '{logtype}' for search_utm_logs. "
+                f"Valid UTM types: {', '.join(sorted(_UTM_LOG_TYPES))}. "
+                "For traffic use search_traffic_logs, for IPS/attack use "
+                "search_security_logs, for system events use search_event_logs."
+            )
+
+        filters = []
+        if srcip:
+            filters.append(f"srcip=={validate_ip_or_cidr(srcip, 'srcip')}")
+        if dstip:
+            filters.append(f"dstip=={validate_ip_or_cidr(dstip, 'dstip')}")
+        if action:
+            filters.append(f"action=={sanitize_filter_value(action, 'action')}")
+        if level:
+            filters.append(f"level=={validate_event_level(level)}")
+        if filter:
+            filters.append(filter)
+
+        filter_str = " and ".join(filters) if filters else None
+
+        result: dict[str, Any] = await query_logs(
+            adom=adom,
+            logtype=logtype,
+            device=device,
+            time_range=time_range,
+            filter=filter_str,
+            limit=limit,
+            timeout=timeout,
+        )
+
+        if result.get("status") == "success":
+            result["filter_applied"] = filter_str or "none"
+
+        return result
+
+    except ValidationError as e:
+        return error_response(
+            error="validation_error",
+            message=f"Validation error: {e}",
+            operation="search_utm_logs",
+            adom=adom,
+        )
+    except Exception as e:
+        logger.error(f"Failed to search UTM logs: {e}")
+        return error_response(
+            error="faz_operation_failed",
+            message=str(e),
+            operation="search_utm_logs",
             adom=adom,
             retry_count=getattr(e, "retries_attempted", 0),
         )
