@@ -1,6 +1,14 @@
 """Tests for the shared tool response helpers (error envelope, warnings, redaction)."""
 
-from fortianalyzer_mcp.utils.responses import build_warnings, error_response, redact
+from unittest.mock import patch
+
+from fortianalyzer_mcp.utils.responses import (
+    build_warnings,
+    compact_response,
+    error_response,
+    maybe_compact,
+    redact,
+)
 from fortianalyzer_mcp.utils.validation import MASK_VALUE
 
 
@@ -145,3 +153,111 @@ class TestErrorResponse:
     def test_truncates_long_message(self):
         r = error_response(error="faz_operation_failed", message="x" * 2000, operation="query_logs")
         assert len(r["message"]) < 600
+
+
+class TestCompactResponse:
+    """compact_response() strips None/empty-dict/empty-list but preserves falsy scalars."""
+
+    def test_removes_none_values(self):
+        out = compact_response({"a": 1, "b": None})
+        assert "b" not in out
+        assert out["a"] == 1
+
+    def test_removes_empty_dict(self):
+        out = compact_response({"a": 1, "b": {}})
+        assert "b" not in out
+
+    def test_removes_empty_list(self):
+        out = compact_response({"a": 1, "b": []})
+        assert "b" not in out
+
+    def test_preserves_false(self):
+        out = compact_response({"flag": False})
+        assert out["flag"] is False
+
+    def test_preserves_zero(self):
+        out = compact_response({"count": 0})
+        assert out["count"] == 0
+
+    def test_preserves_empty_string(self):
+        out = compact_response({"s": ""})
+        assert out["s"] == ""
+
+    def test_recursive_dict(self):
+        out = compact_response({"nested": {"x": None, "y": 1}})
+        assert "x" not in out["nested"]
+        assert out["nested"]["y"] == 1
+
+    def test_list_passthrough(self):
+        out = compact_response([{"a": None, "b": 2}, {"c": 3}])
+        assert out == [{"b": 2}, {"c": 3}]
+
+    def test_scalar_passthrough(self):
+        assert compact_response(42) == 42
+        assert compact_response("hello") == "hello"
+
+
+class TestMaybeCompact:
+    """maybe_compact() gates on the FAZ_COMPACT_RESPONSES setting."""
+
+    def _settings_on(self):
+        """Return a mock settings object with compact enabled."""
+
+        class S:
+            FAZ_COMPACT_RESPONSES = True
+
+        return S()
+
+    def _settings_off(self):
+        class S:
+            FAZ_COMPACT_RESPONSES = False
+
+        return S()
+
+    def test_passthrough_when_disabled(self):
+        payload = {"status": "success", "data": None}
+        with patch(
+            "fortianalyzer_mcp.utils.responses.get_settings", return_value=self._settings_off()
+        ):
+            out = maybe_compact(payload)
+        assert out is payload
+
+    def test_strips_nulls_when_enabled(self):
+        payload = {"status": "success", "data": None, "count": 1}
+        with patch(
+            "fortianalyzer_mcp.utils.responses.get_settings", return_value=self._settings_on()
+        ):
+            out = maybe_compact(payload)
+        assert "data" not in out
+        assert out["count"] == 1
+
+    def test_skips_error_responses(self):
+        payload = {"status": "error", "message": "boom", "data": None}
+        with patch(
+            "fortianalyzer_mcp.utils.responses.get_settings", return_value=self._settings_on()
+        ):
+            out = maybe_compact(payload)
+        assert out is payload
+
+    def test_prunes_log_entries(self):
+        logs = [
+            {"srcip": "10.0.0.1", "dstip": "10.0.0.2", "unrelated_field": "drop_me", "action": "accept"}
+        ]
+        payload = {"status": "success", "logs": logs}
+        with patch(
+            "fortianalyzer_mcp.utils.responses.get_settings", return_value=self._settings_on()
+        ):
+            out = maybe_compact(payload)
+        assert "unrelated_field" not in out["logs"][0]
+        assert out["logs"][0]["srcip"] == "10.0.0.1"
+        assert out["logs"][0]["action"] == "accept"
+
+    def test_preserves_non_log_lists_intact(self):
+        payload = {"status": "success", "items": [{"foo": None, "bar": 1}]}
+        with patch(
+            "fortianalyzer_mcp.utils.responses.get_settings", return_value=self._settings_on()
+        ):
+            out = maybe_compact(payload)
+        # compact_response strips the None inside items entries
+        assert "foo" not in out["items"][0]
+        assert out["items"][0]["bar"] == 1

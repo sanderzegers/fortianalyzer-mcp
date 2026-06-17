@@ -24,7 +24,7 @@ from fortianalyzer_mcp.tools.log_tools import (
     _run_logsearch_page,
 )
 from fortianalyzer_mcp.utils.log_clock import resolve_time_window
-from fortianalyzer_mcp.utils.responses import error_response
+from fortianalyzer_mcp.utils.responses import error_response, maybe_compact
 from fortianalyzer_mcp.utils.time_range import (
     parse_time_range,
     parse_time_range_bounds,
@@ -683,7 +683,7 @@ async def _run_bounded_policy_analysis(
                 per_policy.append(entry)
 
         elapsed = time.monotonic() - start
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom_value,
             "time_range": window,
@@ -692,7 +692,7 @@ async def _run_bounded_policy_analysis(
             "clock_skew_seconds": resolved.clock_skew_seconds,
             "results": per_policy,
             "query_time_seconds": round(elapsed, 2),
-        }
+        })
 
     except ValidationError as e:
         return error_response(

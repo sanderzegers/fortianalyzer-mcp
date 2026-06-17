@@ -8,10 +8,19 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.utils.config import get_settings
+from fortianalyzer_mcp.utils.responses import maybe_compact, redact
 from fortianalyzer_mcp.utils.validation import get_default_adom, sanitize_for_logging
 
 logger = logging.getLogger(__name__)
+
+_COMPACT_ADOM_FIELDS = ["name", "oid", "state", "desc", "version", "mr"]
+_COMPACT_DEVICE_FIELDS = [
+    "name", "sn", "ip", "os_type", "os_ver", "mr", "patch",
+    "platform_str", "ha_mode", "mgmt_mode", "conn_status",
+    "adm_usr", "adom",
+]
+_COMPACT_HA_SLAVE_FIELDS = ["sn", "name", "status", "prio", "idx"]
 
 
 def _get_client() -> FortiAnalyzerClient:
@@ -53,10 +62,10 @@ async def get_system_status() -> dict[str, Any]:
     try:
         client = _get_client()
         data = await client.get_system_status()
-        return {
+        return maybe_compact({
             "status": "success",
             "data": data,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get system status: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -85,10 +94,10 @@ async def get_ha_status() -> dict[str, Any]:
     try:
         client = _get_client()
         data = await client.get_ha_status()
-        return {
+        return maybe_compact({
             "status": "success",
             "data": data,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get HA status: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -125,12 +134,14 @@ async def list_adoms(
     """
     try:
         client = _get_client()
+        if fields is None and get_settings().FAZ_COMPACT_RESPONSES:
+            fields = _COMPACT_ADOM_FIELDS
         adoms = await client.list_adoms(fields=fields)
-        return {
+        return maybe_compact({
             "status": "success",
             "count": len(adoms),
             "adoms": adoms,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to list ADOMs: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -162,10 +173,10 @@ async def get_adom(
         client = _get_client()
         loadsub = 1 if include_details else 0
         adom = await client.get_adom(name, loadsub=loadsub)
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get ADOM {name}: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -180,6 +191,8 @@ async def get_adom(
 async def list_devices(
     adom: str | None = None,
     fields: list[str] | None = None,
+    limit: int = 25,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """List all devices registered in an ADOM.
 
@@ -189,11 +202,15 @@ async def list_devices(
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
         fields: Specific fields to return (optional)
+        limit: Maximum devices to return per page (default: 25)
+        offset: Offset for pagination (default: 0)
 
     Returns:
         dict: Device list with keys:
             - status: "success" or "error"
-            - count: Number of devices
+            - count: Number of devices returned
+            - offset: Current offset
+            - has_more: Whether more devices may exist beyond this page
             - devices: List of device objects with name, ip, os_ver, etc.
             - message: Error message if failed
 
@@ -205,14 +222,37 @@ async def list_devices(
     try:
         adom = adom or get_default_adom()
         client = _get_client()
-        devices = await client.list_devices(adom, fields=fields)
-        return {
+        compact = get_settings().FAZ_COMPACT_RESPONSES
+        if fields is None and compact:
+            fields = _COMPACT_DEVICE_FIELDS
+        devices = await client.list_devices(
+            adom, fields=fields, loadsub=1, limit=limit, offset=offset
+        )
+
+        if compact:
+            pruned = []
+            for dev in devices:
+                pruned_dev = {k: v for k, v in dev.items() if k in _COMPACT_DEVICE_FIELDS}
+                if "ha_slave" in dev and isinstance(dev["ha_slave"], list):
+                    pruned_dev["ha_slave"] = [
+                        {k: v for k, v in slave.items() if k in _COMPACT_HA_SLAVE_FIELDS}
+                        for slave in dev["ha_slave"]
+                    ]
+                pruned.append(pruned_dev)
+            devices = pruned
+
+        count = len(devices)
+        has_more = count >= limit if limit > 0 else False
+
+        return maybe_compact({
             "status": "success",
-            "count": len(devices),
+            "count": count,
+            "offset": offset,
+            "has_more": has_more,
             # DVMDB device objects carry credential material (adm_pass, etc.);
             # mask it before returning over MCP.
             "devices": sanitize_for_logging(devices),
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to list devices in ADOM {adom}: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -247,12 +287,12 @@ async def get_device(
         client = _get_client()
         loadsub = 1 if include_details else 0
         device = await client.get_device(name, adom, loadsub=loadsub)
-        return {
+        return maybe_compact({
             "status": "success",
             # DVMDB device objects carry credential material (adm_pass, etc.);
             # mask it before returning over MCP.
             "device": sanitize_for_logging(device),
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get device {name}: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -306,11 +346,11 @@ async def list_tasks(
             filter_list = [["state", "==", filter_state]]
 
         tasks = await client.list_tasks(filter=filter_list)
-        return {
+        return maybe_compact({
             "status": "success",
             "count": len(tasks),
             "tasks": tasks,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to list tasks: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -352,7 +392,7 @@ async def get_task(
             lines = await client.get_task_line(task_id)
             result["lines"] = lines
 
-        return result
+        return maybe_compact(result)
     except Exception as e:
         logger.error(f"Failed to get task {task_id}: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -406,12 +446,13 @@ async def wait_for_task(
 
             # Check if completed
             if state in ("done", "error", "cancelled"):
-                return {
+                resp = {
                     "status": "success" if state == "done" else "error",
                     "task": task,
                     "completed": True,
                     "message": f"Task completed with state: {state}",
                 }
+                return maybe_compact(resp) if state == "done" else resp
 
             # Wait before next poll
             await asyncio.sleep(poll_interval)
@@ -452,10 +493,10 @@ async def get_api_ratelimit() -> dict[str, Any]:
     try:
         client = _get_client()
         data = await client.get("/cli/global/system/log/api-ratelimit")
-        return {
+        return maybe_compact({
             "status": "success",
             "data": data,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get API rate limit: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -517,11 +558,11 @@ async def update_api_ratelimit(
         client = _get_client()
         result = await client.update("/cli/global/system/log/api-ratelimit", data=data)
 
-        return {
+        return maybe_compact({
             "status": "success",
             "message": "API rate limits updated successfully",
             "data": result if result else data,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to update API rate limit: {e}")
         return {"status": "error", "message": redact(str(e))}

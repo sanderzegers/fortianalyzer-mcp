@@ -609,6 +609,8 @@ class FortiAnalyzerClient:
         fields: list[str] | None = None,
         filter: list[Any] | None = None,
         loadsub: int = 0,
+        limit: int = 0,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """List devices in ADOM.
 
@@ -619,6 +621,8 @@ class FortiAnalyzerClient:
             params["fields"] = fields
         if filter:
             params["filter"] = filter
+        if limit > 0:
+            params["range"] = [offset, limit]
 
         result = await self.get(f"/dvmdb/adom/{adom}/device", **params)
         return result if isinstance(result, list) else [result] if result else []

@@ -16,6 +16,7 @@ caller's wall clock no longer matters.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -42,6 +43,38 @@ _RANGE_MAP: dict[str, timedelta] = {
 
 # Public for documentation / docstrings in callers.
 SUPPORTED_TIME_RANGES: tuple[str, ...] = tuple(_RANGE_MAP.keys())
+
+_DYNAMIC_RE = re.compile(
+    r"^(\d+(?:\.\d+)?)-"
+    r"(min(?:ute)?s?|hour?s?|day?s?|week?s?|month?s?)$",
+    re.IGNORECASE,
+)
+
+_UNIT_SECONDS: dict[str, int] = {
+    "min": 60, "minute": 60, "minutes": 60,
+    "hour": 3600, "hours": 3600,
+    "day": 86400, "days": 86400,
+    "week": 604800, "weeks": 604800,
+    "month": 2592000, "months": 2592000,
+}
+
+
+def _parse_dynamic_range(time_range: str) -> dict[str, str] | None:
+    """Parse a free-form N-unit time range string like '3.5-day' or '90-min'.
+
+    Returns a FAZ-compatible time dict or None if not parseable.
+    """
+    m = _DYNAMIC_RE.match(time_range.strip())
+    if not m:
+        return None
+    value = float(m.group(1))
+    unit = m.group(2).lower().rstrip("s")
+    seconds = _UNIT_SECONDS.get(unit) or _UNIT_SECONDS.get(unit + "s")
+    if seconds is None:
+        return None
+    total_seconds = int(value * seconds)
+    # Return as a relative range dict that FAZ understands
+    return {"range": f"-{total_seconds}", "unit": "second"}
 
 
 def parse_time_range(
@@ -99,6 +132,9 @@ def parse_time_range(
 
     delta = _RANGE_MAP.get(time_range)
     if delta is None:
+        dynamic = _parse_dynamic_range(time_range)
+        if dynamic is not None:
+            return dynamic
         raise ValueError(
             f"Unknown time_range {time_range!r}. Valid presets: "
             f"{', '.join(SUPPORTED_TIME_RANGES)}. Or use a custom range "

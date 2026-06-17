@@ -12,7 +12,7 @@ from typing import Any
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.utils.log_clock import resolve_time_window
-from fortianalyzer_mcp.utils.responses import build_warnings, error_response, redact
+from fortianalyzer_mcp.utils.responses import build_warnings, error_response, maybe_compact, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
@@ -631,7 +631,7 @@ async def query_logs(
             },
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "count": count,
             "total": total,
@@ -661,7 +661,7 @@ async def query_logs(
             "offset": offset,
             "limit": limit,
             "warnings": warnings,
-        }
+        })
 
     except ValidationError as e:
         return error_response(
@@ -718,7 +718,7 @@ async def get_log_search_progress(
             operation="get_log_search_progress",
         )
 
-    return {
+    return maybe_compact({
         "status": "success",
         "progress_percent": 100,
         "tid": tid,
@@ -727,7 +727,7 @@ async def get_log_search_progress(
             "query_logs completes searches synchronously; there is no separately "
             "pollable in-progress task. Use fetch_more_logs(tid=...) to page results."
         ),
-    }
+    })
 
 
 @mcp.tool()
@@ -940,7 +940,7 @@ async def fetch_more_logs(
                 redact(str(context.get("time_range"))),
             )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "count": count,
             "logs": logs,
@@ -967,7 +967,7 @@ async def fetch_more_logs(
             "time_basis_source": time_basis_source,
             "clock_skew_seconds": clock_skew_seconds,
             "warnings": warnings,
-        }
+        })
     except ValidationError as e:
         return error_response(
             error="validation_error",
@@ -1032,12 +1032,12 @@ async def cancel_log_search(
             logger.debug(f"logsearch_cancel best-effort failed for handle {tid}: {exc}")
         _unregister_search(tid)
 
-        return {
+        return maybe_compact({
             "status": "success",
             "message": f"Search {tid} released",
             "tid": tid,
             "adom": adom,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to cancel search: {e}")
         return error_response(
@@ -1077,10 +1077,10 @@ async def get_log_stats(
         client = _get_client()
         device_filter = _build_device_filter(device) if device else None
         stats = await client.get_logstats(adom, device_filter)
-        return {
+        return maybe_compact({
             "status": "success",
             "stats": stats,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get log stats for ADOM {adom}: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -1116,10 +1116,10 @@ async def get_log_fields(
         adom = adom or get_default_adom()
         client = _get_client()
         result = await client.get_logfields(adom, logtype, devtype)
-        return {
+        return maybe_compact({
             "status": "success",
             "fields": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get log fields: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -1457,10 +1457,10 @@ async def get_logfiles_state(
             time_range=time_range_dict,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get log files state: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -1508,10 +1508,10 @@ async def get_pcap_file(
         client = _get_client()
         result = await client.get_pcapfile(log_data, key_type)
 
-        return {
+        return maybe_compact({
             "status": "success",
             "data": result,
-        }
+        })
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:

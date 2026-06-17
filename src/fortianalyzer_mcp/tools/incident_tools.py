@@ -9,7 +9,7 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.utils.responses import maybe_compact, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
@@ -95,13 +95,13 @@ async def get_incidents(
         if not isinstance(data, list):
             data = [data] if data else []
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "time_range": tr,
             "count": len(data),
             "data": data,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get incidents: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -138,12 +138,12 @@ async def get_incident(
             incident_id=incident_id,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "incident_id": incident_id,
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get incident {incident_id}: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -182,12 +182,12 @@ async def get_incident_count(
             filter=filter,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "time_range": tr,
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get incident count: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -242,13 +242,13 @@ async def create_incident(
             description=description,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "name": name,
             "severity": severity,
             "data": result,
-        }
+        })
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
@@ -312,12 +312,12 @@ async def update_incident(
             assignee=assignee,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "incident_id": incident_id,
             "data": result,
-        }
+        })
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
@@ -367,12 +367,12 @@ async def get_incident_stats(
             stats_items=stats_items,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "time_range": tr,
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get incident stats: {e}")
         return {"status": "error", "message": redact(str(e))}

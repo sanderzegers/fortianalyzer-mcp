@@ -10,7 +10,7 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.utils.responses import maybe_compact, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
@@ -132,13 +132,13 @@ async def run_fortiview(
 
         tid = result.get("tid") if isinstance(result, dict) else None
 
-        return {
+        return maybe_compact({
             "status": "success",
             "tid": tid,
             "view_name": view_name,
             "adom": adom,
             "time_range": tr,
-        }
+        })
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
@@ -185,13 +185,13 @@ async def fetch_fortiview(
         if not isinstance(data, list):
             data = [data] if data else []
 
-        return {
+        return maybe_compact({
             "status": "success",
             "tid": tid,
             "view_name": view_name,
             "count": len(data),
             "data": data,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to fetch FortiView results: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -310,13 +310,13 @@ async def get_fortiview_data(
                     if not isinstance(data, list):
                         data = [data] if data else []
 
-                    return {
+                    return maybe_compact({
                         "status": "success",
                         "tid": tid,
                         "view_name": view_name,
                         "count": len(data),
                         "data": data,
-                    }
+                    })
 
             await asyncio.sleep(poll_interval)
 

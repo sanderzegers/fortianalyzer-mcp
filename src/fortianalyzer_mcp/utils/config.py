@@ -120,6 +120,12 @@ class Settings(BaseSettings):
         description="Tool loading mode: 'full' loads all tools, 'dynamic' loads meta-tools only",
     )
 
+    FAZ_COMPACT_RESPONSES: bool = Field(
+        default=False,
+        description="Strip null/empty fields from tool responses to reduce context size. "
+        "Recommended when using small-context local LLMs with FAZ_TOOL_MODE=dynamic.",
+    )
+
     # Logging Configuration
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="INFO",

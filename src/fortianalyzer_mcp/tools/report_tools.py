@@ -14,7 +14,7 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.utils.responses import maybe_compact, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
@@ -224,12 +224,12 @@ async def list_report_layouts(adom: str | None = None) -> dict[str, Any]:
                 }
             )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "count": len(simplified),
             "data": simplified,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to list report layouts: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -288,12 +288,12 @@ async def list_report_templates(adom: str | None = None) -> dict[str, Any]:
             for tmpl in data
         ]
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "count": len(simplified),
             "data": simplified,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to list report templates: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -399,7 +399,7 @@ async def run_report(
                 "api_response": result,
             }
 
-        return {
+        return maybe_compact({
             "status": "success",
             "tid": tid,
             "layout": layout,
@@ -408,7 +408,7 @@ async def run_report(
             "time_period": time_period,
             "schedule_created": schedule_created,
             "message": f"Report started. Use get_running_reports() to check progress, then get_report_data(tid='{tid}') to download.",
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to run report '{layout}': {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -442,12 +442,12 @@ async def fetch_report(
 
         result = await client.report_fetch(adom=adom, tid=tid)
 
-        return {
+        return maybe_compact({
             "status": "success",
             "tid": tid,
             "adom": adom,
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to fetch report status: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -492,12 +492,12 @@ async def get_report_data(
 
         result = await client.report_get_data(adom=adom, tid=tid, output_format=output_format)
 
-        return {
+        return maybe_compact({
             "status": "success",
             "tid": tid,
             "adom": adom,
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get report data: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -535,12 +535,12 @@ async def get_running_reports(
         if not isinstance(data, list):
             data = [data] if data else []
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "count": len(data),
             "data": data,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get running reports: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -587,12 +587,12 @@ async def get_report_history(
         if not isinstance(data, list):
             data = [data] if data else []
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "count": len(data),
             "data": data,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get report history: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -726,7 +726,7 @@ async def run_and_wait_report(
                 logger.info(f"Report {tid} progress: {percentage}%")
 
                 if percentage >= 100:
-                    return {
+                    return maybe_compact({
                         "status": "success",
                         "tid": tid,
                         "layout": layout,
@@ -734,7 +734,7 @@ async def run_and_wait_report(
                         "adom": adom,
                         "time_period": time_period,
                         "message": "Report completed. Use get_report_data() to download.",
-                    }
+                    })
             else:
                 # Report not in running list - either completed or failed.
                 # Verify via report_fetch instead of assuming success
@@ -743,7 +743,7 @@ async def run_and_wait_report(
                 fetch_result = await client.report_fetch(adom=adom, tid=tid)
                 state = fetch_result.get("state") if isinstance(fetch_result, dict) else None
                 if state == "generated":
-                    return {
+                    return maybe_compact({
                         "status": "success",
                         "tid": tid,
                         "layout": layout,
@@ -751,7 +751,7 @@ async def run_and_wait_report(
                         "adom": adom,
                         "time_period": time_period,
                         "message": "Report completed. Use get_report_data() to download.",
-                    }
+                    })
                 if state not in ("pending", "running"):
                     return {
                         "status": "error",
@@ -932,7 +932,7 @@ async def save_report(
             saved_files.append(str(output_file))
             logger.info(f"Saved: {output_file}")
 
-        return {
+        return maybe_compact({
             "status": "success",
             "tid": tid,
             "format": output_format,
@@ -940,7 +940,7 @@ async def save_report(
             "files": saved_files,
             "file_count": len(saved_files),
             "message": f"Report saved to {output_path}",
-        }
+        })
 
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}

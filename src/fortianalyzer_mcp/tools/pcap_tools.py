@@ -18,7 +18,7 @@ from typing import Any
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tools.log_tools import _clamp_timeout, _run_logsearch_page
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.utils.responses import maybe_compact, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
@@ -328,7 +328,7 @@ async def search_ips_logs(
         # Count how many have PCAP available
         pcap_available = sum(1 for log in logs if log.get("pcapurl"))
 
-        return {
+        return maybe_compact({
             "status": "success",
             "count": len(logs),
             "pcap_available_count": pcap_available,
@@ -337,7 +337,7 @@ async def search_ips_logs(
             "filter_applied": filter_str or "none",
             "tid": page["tid"],
             "time_range": time_range_dict,
-        }
+        })
 
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
@@ -545,7 +545,7 @@ async def get_pcap_by_session(
                 "message": "No PCAP file found in ZIP archive",
             }
 
-        return {
+        return maybe_compact({
             "status": "success",
             "session_id": session_id,
             "file_path": saved_file,
@@ -559,7 +559,7 @@ async def get_pcap_by_session(
                 "cve": log_entry.get("cve"),
             },
             "message": f"PCAP downloaded successfully to {saved_file}",
-        }
+        })
 
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
@@ -680,12 +680,12 @@ async def download_pcap_by_url(
         if not saved_file:
             return {"status": "error", "message": "No PCAP file found in archive"}
 
-        return {
+        return maybe_compact({
             "status": "success",
             "file_path": saved_file,
             "file_size": file_size,
             "message": f"PCAP downloaded to {saved_file}",
-        }
+        })
 
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
@@ -901,7 +901,7 @@ async def search_and_download_pcaps(
             # Small delay between downloads
             await asyncio.sleep(0.5)
 
-        return {
+        return maybe_compact({
             "status": "success",
             "search_results": len(logs),
             "pcap_available": len(logs_with_pcap),
@@ -912,7 +912,7 @@ async def search_and_download_pcaps(
             "errors": errors if errors else None,
             "output_dir": str(output_path),
             "message": f"Downloaded {len(downloaded_files)} PCAPs, skipped {skipped_count}, failed {failed_count}",
-        }
+        })
 
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
@@ -1009,13 +1009,13 @@ async def list_available_pcaps(
                 }
             )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "count": len(events),
             "events": events,
             "time_range": search_result.get("time_range"),
             "message": f"Found {len(events)} IPS events with PCAP available",
-        }
+        })
 
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}

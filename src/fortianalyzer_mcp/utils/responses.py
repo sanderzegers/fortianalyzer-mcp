@@ -86,6 +86,38 @@ def build_warnings(
     return warnings
 
 
+def compact_response(obj: Any) -> Any:
+    """Recursively strip None values, empty dicts, and empty lists from obj.
+
+    Meaningful falsy values (False, 0, empty string) are preserved.
+    """
+    if isinstance(obj, dict):
+        return {
+            k: compact_response(v)
+            for k, v in obj.items()
+            if v is not None and v != {} and v != []
+        }
+    if isinstance(obj, list):
+        return [compact_response(item) for item in obj]
+    return obj
+
+
+def maybe_compact(response: dict[str, Any]) -> dict[str, Any]:
+    """Apply compact_response when FAZ_COMPACT_RESPONSES is enabled.
+
+    Strips None values, empty dicts, and empty lists from the response.
+    Error responses are never compacted.
+    """
+    from fortianalyzer_mcp.utils.config import get_settings
+
+    if not get_settings().FAZ_COMPACT_RESPONSES:
+        return response
+    if response.get("status") == "error":
+        return response
+
+    return compact_response(response)
+
+
 def error_response(
     *,
     error: str,

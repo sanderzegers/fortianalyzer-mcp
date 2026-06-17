@@ -9,7 +9,7 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.utils.responses import maybe_compact, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import get_default_adom
 
@@ -87,13 +87,13 @@ async def get_alerts(
         if not isinstance(data, list):
             data = [data] if data else []
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "time_range": tr,
             "count": len(data),
             "data": data,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get alerts: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -128,12 +128,12 @@ async def get_alert_count(
             filter=filter,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "time_range": tr,
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get alert count: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -169,13 +169,13 @@ async def acknowledge_alerts(
             user=user,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "acknowledged_count": len(alert_ids),
             "user": user,
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to acknowledge alerts: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -211,13 +211,13 @@ async def unacknowledge_alerts(
             user=user,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "unacknowledged_count": len(alert_ids),
             "user": user,
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to unacknowledge alerts: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -256,12 +256,12 @@ async def get_alert_logs(
             offset=offset,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "alert_count": len(alert_ids),
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get alert logs: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -295,11 +295,11 @@ async def get_alert_details(
             alert_ids=alert_ids,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get alert details: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -338,13 +338,13 @@ async def add_alert_comment(
             user=user,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "alert_id": alert_id,
             "user": user,
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to add alert comment: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -384,13 +384,13 @@ async def get_alert_incident_stats(
             stat_type=stat_type,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "stat_type": stat_type,
             "time_range": tr,
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get alert-incident stats: {e}")
         return {"status": "error", "message": redact(str(e))}

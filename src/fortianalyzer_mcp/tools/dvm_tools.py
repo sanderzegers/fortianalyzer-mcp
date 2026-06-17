@@ -10,7 +10,7 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.utils.responses import maybe_compact, redact
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
     get_default_adom,
@@ -63,11 +63,11 @@ async def list_device_groups(
         client = _get_client()
         groups = await client.list_device_groups(adom)
 
-        return {
+        return maybe_compact({
             "status": "success",
             "count": len(groups),
             "groups": groups,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to list device groups: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -104,11 +104,11 @@ async def list_device_vdoms(
         client = _get_client()
         vdoms = await client.list_device_vdoms(device, adom)
 
-        return {
+        return maybe_compact({
             "status": "success",
             "count": len(vdoms),
             "vdoms": vdoms,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to list VDOMs for device {device}: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -219,11 +219,11 @@ async def add_device(
         if isinstance(device_result, dict):
             device_result = {k: v for k, v in device_result.items() if k not in sensitive_keys}
 
-        return {
+        return maybe_compact({
             "status": "success",
             "device": device_result,
             "task_id": result.get("taskid"),
-        }
+        })
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
@@ -271,11 +271,11 @@ async def delete_device(
             flags=flags,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "task_id": result.get("taskid"),
             "message": f"Device {device} deleted successfully",
-        }
+        })
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
@@ -337,12 +337,12 @@ async def add_devices_bulk(
         sensitive_keys = {"adm_pass", "adm_passwd"}
         devices_safe = [{k: v for k, v in d.items() if k not in sensitive_keys} for d in devices]
 
-        return {
+        return maybe_compact({
             "status": "success",
             "added_count": len(devices),
             "devices": devices_safe,
             "task_id": result.get("taskid"),
-        }
+        })
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
@@ -393,11 +393,11 @@ async def delete_devices_bulk(
             flags=flags,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "deleted_count": len(devices),
             "task_id": result.get("taskid"),
-        }
+        })
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
@@ -448,7 +448,7 @@ async def get_device_info(
             vdoms = await client.list_device_vdoms(device, adom)
             result["vdoms"] = vdoms
 
-        return result
+        return maybe_compact(result)
     except Exception as e:
         logger.error(f"Failed to get device info for {device}: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -507,13 +507,13 @@ async def search_devices(
             filter=filters if filters else None,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "count": len(devices),
             # DVMDB device objects carry credential material (adm_pass, etc.);
             # mask it before returning over MCP.
             "devices": sanitize_for_logging(devices),
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to search devices: {e}")
         return {"status": "error", "message": redact(str(e))}

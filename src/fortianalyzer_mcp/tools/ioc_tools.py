@@ -10,7 +10,7 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.utils.responses import maybe_compact, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import build_device_filter, get_default_adom
 
@@ -62,10 +62,10 @@ async def get_ioc_license_state() -> dict[str, Any]:
 
         result = await client.get_ioc_license_state()
 
-        return {
+        return maybe_compact({
             "status": "success",
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get IOC license state: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -107,13 +107,13 @@ async def acknowledge_ioc_events(
             user=user,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "acknowledged_count": len(ioc_ids),
             "user": user,
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to acknowledge IOC events: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -160,12 +160,12 @@ async def run_ioc_rescan(
 
         tid = result.get("tid") if isinstance(result, dict) else None
 
-        return {
+        return maybe_compact({
             "status": "success",
             "tid": tid,
             "adom": adom,
             "time_range": tr,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to start IOC rescan: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -202,12 +202,12 @@ async def get_ioc_rescan_status(
             tid=tid,
         )
 
-        return {
+        return maybe_compact({
             "status": "success",
             "tid": tid,
             "adom": adom,
             "data": result,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get IOC rescan status: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -254,12 +254,12 @@ async def get_ioc_rescan_history(
         if not isinstance(data, list):
             data = [data] if data else []
 
-        return {
+        return maybe_compact({
             "status": "success",
             "adom": adom,
             "count": len(data),
             "data": data,
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to get IOC rescan history: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -334,13 +334,13 @@ async def run_and_wait_ioc_rescan(
                 percentage = raw_pct if isinstance(raw_pct, (int, float)) else 0
 
                 if state in ("done", "completed") or percentage >= 100:
-                    return {
+                    return maybe_compact({
                         "status": "success",
                         "tid": tid,
                         "adom": adom,
                         "time_range": tr,
                         "data": status_result,
-                    }
+                    })
 
                 if state in ("error", "failed"):
                     return {
