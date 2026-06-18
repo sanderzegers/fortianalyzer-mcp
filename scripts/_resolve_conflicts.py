@@ -99,6 +99,48 @@ def _func_nodes(source: str) -> dict:
     }
 
 
+def _new_module_constants(theirs_content: str, base_content: str) -> str:
+    """Return source text for new top-level constant assignments in theirs vs base."""
+    try:
+        theirs_tree = ast.parse(theirs_content)
+        base_tree = ast.parse(base_content)
+    except SyntaxError:
+        return ""
+
+    base_names: set[str] = set()
+    for node in base_tree.body:
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    base_names.add(t.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            base_names.add(node.target.id)
+
+    theirs_lines = theirs_content.splitlines()
+    blocks: list[str] = []
+    for node in theirs_tree.body:
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if not names or any(n in base_names for n in names):
+                continue
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id in base_names:
+                continue
+        else:
+            continue
+
+        # Grab the node's source lines, plus any comment block immediately above.
+        start = node.lineno - 1  # 0-indexed
+        comment_start = start
+        j = start - 1
+        while j >= 0 and theirs_lines[j].strip().startswith("#"):
+            comment_start = j
+            j -= 1
+        blocks.append("\n".join(theirs_lines[comment_start:node.end_lineno]))
+
+    return "\n\n".join(blocks)
+
+
 def _find_mcp_tool_decorator_line(lines: list[str], func_lineno_1idx: int) -> int:
     """Return the 0-indexed line of the @mcp.tool() decorator before func_lineno."""
     idx = func_lineno_1idx - 1  # convert to 0-indexed
@@ -210,6 +252,25 @@ def resolve_log_tools_py(file_path: str) -> bool:
     if not graft:
         print("  log_tools.py: graft extraction failed", file=sys.stderr)
         return False
+
+    constants = _new_module_constants(theirs_content, base_content)
+    if constants:
+        ours_names = {
+            t.id
+            for node in ast.parse(ours_content).body
+            if isinstance(node, ast.Assign)
+            for t in node.targets
+            if isinstance(t, ast.Name)
+        }
+        filtered = []
+        for block in constants.split("\n\n"):
+            name_match = re.search(r"^([A-Z_][A-Z0-9_]*)\s*=", block, re.MULTILINE)
+            if name_match and name_match.group(1) in ours_names:
+                print(f"  log_tools.py: constant {name_match.group(1)} already in ours, skipping")
+                continue
+            filtered.append(block)
+        if filtered:
+            graft = "\n\n".join(filtered) + "\n\n" + graft
 
     merged = _insert_graft(ours_content, graft)
 
