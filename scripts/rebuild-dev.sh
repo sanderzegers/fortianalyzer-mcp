@@ -42,9 +42,19 @@ done
 # --- Reset dev ---
 BASE="$(git rev-parse --short upstream/main)"
 info "Resetting dev to upstream/main ($BASE)"
+
+# Preserve untracked scripts/ across the branch delete+recreate.
+_SCRIPTS_BACKUP="$(mktemp -d)"
+cp -r scripts/. "$_SCRIPTS_BACKUP/"
+
 git checkout -q main
 git branch -D dev 2>/dev/null || true
 git checkout -q -b dev upstream/main
+
+# Restore scripts/.
+mkdir -p scripts
+cp -r "$_SCRIPTS_BACKUP/." scripts/
+rm -rf "$_SCRIPTS_BACKUP"
 
 # --- Merge each branch ---
 for branch in "${BRANCHES[@]}"; do
